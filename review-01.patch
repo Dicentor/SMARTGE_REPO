@@ -1,0 +1,245 @@
+diff --git a/main/firestore.cpp b/main/firestore.cpp
+index 1111111..2222222 100644
+--- a/main/firestore.cpp
++++ b/main/firestore.cpp
+@@
+ static const char* TAG = "firestore";
+ 
+ static std::string g_id_token;
+ static std::string g_refresh_token;
+ static int g_expires_in = 0; // Sekunden
+ static int64_t g_token_birth_us = 0;
+ 
+-static bool http_request(const char* url, const char* method, const std::string& body, std::string& out, const char* authBearer=nullptr)
++static bool http_request(const char* url, const char* method, const std::string& body, std::string& out, const char* authBearer=nullptr)
+ {
+     esp_http_client_config_t cfg = {
+         .url = url,
+         .cert_pem = GOOGLE_ROOT_CA_PEM,
+         .timeout_ms = 15000,
+     };
+     esp_http_client_handle_t client = esp_http_client_init(&cfg);
+     esp_http_client_set_method(client, (esp_http_client_method_t)(
+         strcmp(method,"GET")==0?HTTP_METHOD_GET:
+         strcmp(method,"POST")==0?HTTP_METHOD_POST:
+         strcmp(method,"PATCH")==0?HTTP_METHOD_PATCH:HTTP_METHOD_GET));
+ 
+-    if (authBearer) {
+-        std::string h = std::string("Authorization: Bearer ")+authBearer;
+-        esp_http_client_set_header(client, "Authorization", h.c_str()+13);
+-        esp_http_client_set_header(client, "Authorization", (std::string("Bearer ")+authBearer).c_str());
+-    }
++    if (authBearer) {
++        std::string bearer = std::string("Bearer ") + authBearer;
++        esp_http_client_set_header(client, "Authorization", bearer.c_str());
++    }
+     esp_http_client_set_header(client, "Content-Type", "application/json");
+ 
+     if (!body.empty()) esp_http_client_set_post_field(client, body.c_str(), body.size());
+ 
+     esp_err_t err = esp_http_client_perform(client);
+     if (err != ESP_OK) {
+         ESP_LOGE(TAG, "HTTP %s error: %s", method, esp_err_to_name(err));
+         esp_http_client_cleanup(client);
+         return false;
+     }
+     int status = esp_http_client_get_status_code(client);
+-    int len = esp_http_client_get_content_length(client);
+-
+-    if (status < 200 || status >= 300) {
+-        ESP_LOGE(TAG, "HTTP status %d", status);
+-    }
+-
+-    out.clear();
+-    out.resize(std::max(0, len));
+-    if (len > 0) {
+-        int read = esp_http_client_read_response(client, out.data(), len);
+-        if (read < 0) out.clear();
+-        else out.resize(read);
+-    }
++    if (status < 200 || status >= 300) {
++        ESP_LOGE(TAG, "HTTP status %d", status);
++    }
++    // Robust: chunked + unknown length lesen
++    out.clear();
++    char buf[512];
++    while (true) {
++        int r = esp_http_client_read(client, buf, sizeof(buf));
++        if (r <= 0) break;
++        out.append(buf, r);
++    }
+ 
+     esp_http_client_cleanup(client);
+     return status >= 200 && status < 300;
+ }
+@@ bool firestore_push(const AllReadings& r)
+-    // Bodenfeuchte als 3er Array (doubleValue)
+-    cJSON *arr = cJSON_CreateObject();
+-    cJSON *values = cJSON_CreateArray();
++    // Bodenfeuchte als Firestore-Array: arrayValue.values[]
++    cJSON *soil_field = cJSON_CreateObject();
++    cJSON *arrayValue = cJSON_CreateObject();
++    cJSON *values = cJSON_CreateArray();
+     for (int i=0;i<3;i++) {
+         cJSON *dv = cJSON_CreateObject();
+         cJSON_AddNumberToObject(dv, "doubleValue", r.soil[i].fraction);
+         cJSON_AddItemToArray(values, dv);
+     }
+-    cJSON_AddItemToObject(arr, "values", values);
+-    cJSON_AddItemToObject(fields, "soil", arr);
++    cJSON_AddItemToObject(arrayValue, "values", values);
++    cJSON_AddItemToObject(soil_field, "arrayValue", arrayValue);
++    cJSON_AddItemToObject(fields, "soil", soil_field);
+@@
+-    // Timestamp
+-    char iso[64];
+-    // Firestore erwartet RFC3339 UTC
+-    // (vereinfachte Erstellung ohne Zeitzonenbibliothek)
+-    // Hinweis: Hier für Demo ohne echte RTC -> Serverzeit wäre besser; optional anpassen
+-    snprintf(iso, sizeof(iso), "1970-01-01T00:00:00Z");
++    // Timestamp (RFC3339 UTC)
++    char iso[64];
++    time_t now = 0; time(&now);
++    struct tm tm_utc; gmtime_r(&now, &tm_utc);
++    strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+     cJSON *ts = cJSON_CreateObject(); cJSON_AddStringToObject(ts, "timestampValue", iso);
+     cJSON_AddItemToObject(fields, "timestamp", ts);
+@@
+ static std::vector<double> get_double_array(cJSON* fields, const char* name)
+ {
+     std::vector<double> out;
+-    cJSON* arr = cJSON_GetObjectItemCaseSensitive(fields, name);
+-    if (!arr) return out;
+-    cJSON* values = cJSON_GetObjectItemCaseSensitive(arr, "values");
++    // Firestore: field -> arrayValue -> values[]
++    cJSON* field = cJSON_GetObjectItemCaseSensitive(fields, name);
++    if (!field) return out;
++    cJSON* arrayVal = cJSON_GetObjectItemCaseSensitive(field, "arrayValue");
++    if (!arrayVal) return out;
++    cJSON* values = cJSON_GetObjectItemCaseSensitive(arrayVal, "values");
+     if (!cJSON_IsArray(values)) return out;
+     cJSON* it = nullptr;
+     cJSON_ArrayForEach(it, values) {
+         cJSON* dv = cJSON_GetObjectItemCaseSensitive(it, "doubleValue");
+         if (cJSON_IsNumber(dv)) out.push_back(dv->valuedouble);
+         else {
+             cJSON* iv = cJSON_GetObjectItemCaseSensitive(it, "integerValue");
+             if (cJSON_IsString(iv)) out.push_back((double)atoll(iv->valuestring));
+         }
+     }
+     return out;
+ }
+diff --git a/main/wifi.cpp b/main/wifi.cpp
+index 3333333..4444444 100644
+--- a/main/wifi.cpp
++++ b/main/wifi.cpp
+@@
+     wifi_config_t wifi_config = {};
+     std::strncpy((char*)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
+     std::strncpy((char*)wifi_config.sta.password, WIFI_PASSWORD, sizeof(wifi_config.sta.password));
+     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
++    // PMF (Protected Management Frames) optional aktivieren
++    wifi_config.sta.pmf_cfg.capable = true;
++    wifi_config.sta.pmf_cfg.required = false;
+@@
+     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+     ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
+     ESP_ERROR_CHECK( esp_wifi_start() );
+diff --git a/main/time_sync.h b/main/time_sync.h
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/main/time_sync.h
+@@
++#pragma once
++void time_sync_init();
++bool time_is_set();
+diff --git a/main/time_sync.cpp b/main/time_sync.cpp
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/main/time_sync.cpp
+@@
++#include "time_sync.h"
++#include "esp_sntp.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include <ctime>
++
++static const char* TAG = "time_sync";
++static volatile bool s_time_set = false;
++
++static void sntp_cb(struct timeval *tv) {
++    s_time_set = true;
++}
++
++void time_sync_init() {
++    s_time_set = false;
++    sntp_setoperatingmode(SNTP_OPMODE_POLL);
++    sntp_setservername(0, (char*)"pool.ntp.org");
++    sntp_set_time_sync_notification_cb(sntp_cb);
++    sntp_init();
++    // bis zu 10s warten
++    for (int i=0; i<100 && !s_time_set; ++i) {
++        vTaskDelay(pdMS_TO_TICKS(100));
++    }
++    time_t now = 0;
++    time(&now);
++    if (now > 1600000000) {
++        s_time_set = true;
++        ESP_LOGI(TAG, "Time synced.");
++    } else {
++        ESP_LOGW(TAG, "Time not set yet.");
++    }
++}
++
++bool time_is_set() {
++    return s_time_set;
++}
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 7777777..8888888 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@
+ idf_component_register(
+   SRCS 
+     "main.cpp"
+     "wifi.cpp"
+     "dht22.cpp"
+     "sensors.cpp"
+     "relays.cpp"
+     "leds.cpp"
+     "firestore.cpp"
++    "time_sync.cpp"
+   INCLUDE_DIRS "."
+   REQUIRES 
+     esp_wifi
+     esp_event
+     nvs_flash
+     driver
+     esp_http_client
+     json
+     led_strip
+ )
+diff --git a/main/main.cpp b/main/main.cpp
+index 9999999..aaaaaaa 100644
+--- a/main/main.cpp
++++ b/main/main.cpp
+@@
+ #include "firestore.h"
++#include "time_sync.h"
+@@
+     // WLAN hochfahren
+     leds_set_status(StatusLED::WIFI_CONNECTING);
+     wifi_init_sta();
+     leds_set_status(StatusLED::WIFI_OK);
+ 
+-    // Firebase / Firestore Auth
++    // Zeit holen, dann Firebase / Firestore Auth
++    time_sync_init();
+     if (firebase_auth_init()) {
+         leds_set_status(StatusLED::CLOUD_OK);
+     } else {
+         leds_set_status(StatusLED::ERROR);
+     }
