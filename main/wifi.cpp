@@ -70,6 +70,9 @@ wifi_config_t wifi_config = {};
 std::strncpy((char*)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
 std::strncpy((char*)wifi_config.sta.password, WIFI_PASSWORD, sizeof(wifi_config.sta.password));
 wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+wifi_config.sta.pmf_cfg.capable = true;
+wifi_config.sta.pmf_cfg.required = false; // auf true, wenn dein AP PMF zwingend unterstützt
+
 
 
 ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
