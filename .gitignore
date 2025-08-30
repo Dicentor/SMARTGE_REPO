@@ -1,0 +1,21 @@
+# ESP-IDF
+/build/
+/managed_components/
+/dist/
+/out/
+/cmake-build-*/
+sdkconfig
+sdkconfig.old
+compile_commands.json
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS/sonstiges
+.DS_Store
+Thumbs.db
+
+# Secrets
+main/secrets.h
