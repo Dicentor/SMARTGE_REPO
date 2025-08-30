@@ -5,6 +5,7 @@
 #include "sensors.h"
 #include "relays.h"
 #include "leds.h"
+#include "time_sync.h"
 #include "firestore.h"
 
 
@@ -30,6 +31,15 @@ leds_set_status(StatusLED::BOOT);
 leds_set_status(StatusLED::WIFI_CONNECTING);
 wifi_init_sta();
 leds_set_status(StatusLED::WIFI_OK);
+
+// Zeit holen, dann Firebase / Firestore Auth
+time_sync_init();
+if (firebase_auth_init()) {
+    leds_set_status(StatusLED::CLOUD_OK);
+} else {
+    leds_set_status(StatusLED::ERROR);
+}
+
 
 
 // Firebase / Firestore Auth
